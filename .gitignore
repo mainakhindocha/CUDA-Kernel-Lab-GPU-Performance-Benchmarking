@@ -5,6 +5,7 @@
 *.out
 src/cpu_baseline
 src/matmul_naive
+src/matmul_tiled
 
 # Preserve benchmark execution data and backups locally (uncommitted)
 benchmarks/*.csv

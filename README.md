@@ -1,36 +1,41 @@
 # CUDA Kernel Lab — GPU Performance Benchmarking
-## Stage 1: CPU Baseline vs. Naive CUDA GEMM
+## Stage 1 & Stage 2: CPU Baseline, Naive CUDA GEMM & Shared-Memory Tiled GEMM
 
-A systematic high-performance computing laboratory designed for an **NVIDIA Hardware & Compute Architecture** internship portfolio. This repository studies the execution mechanics, memory access patterns, and computational scaling of General Matrix Multiplication (GEMM) starting from first principles.
-
----
-
-## 📌 Stage 1 Scope & Objectives
-
-The goal of **Stage 1** is to establish rigorous, unoptimized reference implementations and benchmarking harnesses:
-1. **CPU Reference (`src/cpu_baseline.cpp`):** Standard C++ single-threaded baseline matrix multiplication with deterministic initialization and `std::chrono` timing.
-2. **Naive CUDA Kernel (`src/matmul_naive.cu`):** Direct 2D grid/block thread-to-element mapping, boundary handling for non-multiple matrix dimensions, CUDA error checking, isolated PCIe vs. kernel CUDA event timing, and floating-point verification.
-3. **Correctness & Edge-Case Testing (`tests/`):** Automated test plan and execution script covering small matrices, boundary non-divisible dimensions, and invalid inputs.
-4. **Benchmarking Harness (`benchmarks/`):** Scripted execution across multiple dimensions ($N=64$ to $1024+$), logging measured results to CSV.
+A systematic high-performance computing laboratory designed for an **NVIDIA Hardware & Compute Architecture** portfolio. This repository studies the execution mechanics, memory access patterns, hardware bottlenecks, and computational scaling of General Matrix Multiplication (GEMM) from first principles.
 
 ---
 
-## 📁 Repository Structure (Stage 1)
+## 📌 Project Stages & Scope
+
+1. **Stage 1 — CPU Baseline vs. Naive CUDA GEMM:**
+   - **CPU Baseline (`src/cpu_baseline.cpp`):** Single-threaded CPU implementation with deterministic initialization and high-resolution timing.
+   - **Naive CUDA Kernel (`src/matmul_naive.cu`):** Direct 2D thread-to-element mapping, boundary handling, isolated PCIe/kernel CUDA event timing, and numerical verification.
+2. **Stage 2 — Shared-Memory Tiled GEMM (`src/matmul_tiled.cu`):**
+   - **Shared-Memory Caching:** Cooperatively loads $16 \times 16$ (or $32 \times 32$, $8 \times 8$) sub-matrices into on-chip shared memory (SRAM).
+   - **Two-Phase Synchronization Barriers:** Correct use of `__syncthreads()` before consuming tiles and before reusing tile buffers.
+   - **Arbitrary Boundary Handling:** Zero-padded cooperative loads to safely execute arbitrary positive matrix sizes (e.g. 17, 37, 311, 1024, 2048).
+   - **Comparative Benchmarking:** Head-to-head performance comparisons against the Stage 1 naive baseline under identical sizes and iteration counts.
+
+---
+
+## 📁 Repository Structure
 
 ```text
 cuda-kernel-lab/
+├── .gitignore                  # Ignores compiled binaries, temporary files, and local CSV data
+├── README.md                   # Complete architectural guide, compilation, and Colab runbook
 ├── src/
-│   ├── cpu_baseline.cpp        # Self-contained C++ CPU matrix multiplication baseline
-│   └── matmul_naive.cu         # Self-contained Naive CUDA kernel with phase timing
+│   ├── cpu_baseline.cpp        # Self-contained C++ single-threaded CPU reference
+│   ├── matmul_naive.cu         # Stage 1: Naive global-memory CUDA kernel with phase timing
+│   └── matmul_tiled.cu         # Stage 2: Shared-memory tiled CUDA kernel with phase timing
 ├── tests/
-│   ├── test_plan.md            # Test matrix, boundary conditions, and tolerance criteria
-│   ├── run_tests.py            # Automated cross-platform test script
+│   ├── test_plan.md            # Comprehensive test matrix (47 test configurations)
+│   ├── run_tests.py            # Automated cross-platform test script (CPU, Naive, Tiled)
 │   └── run_tests.sh            # Bash test runner for Linux and Google Colab
-├── benchmarks/
-│   ├── run_benchmarks.py       # Multi-size benchmark sweeper with CSV export
-│   ├── run_benchmarks.sh       # Bash benchmark runner
-│   └── cpu_benchmark_results.csv # Real measured CPU execution results
-└── README.md                   # Stage 1 documentation and Colab guide
+└── benchmarks/
+    ├── run_benchmarks.py       # Multi-size sweeper and Naive vs. Tiled comparative harness
+    ├── run_benchmarks.sh       # Bash benchmark runner
+    └── cpu_benchmark_results.csv # Locally measured CPU execution baseline results
 ```
 
 ---
@@ -40,51 +45,64 @@ cuda-kernel-lab/
 We compute the single-precision square matrix product:
 $$\mathbf{C} = \mathbf{A} \times \mathbf{B}$$
 
-Where $\mathbf{A}, \mathbf{B}, \mathbf{C} \in \mathbb{R}^{N \times N}$ stored in contiguous row-major format:
+Where $\mathbf{A}, \mathbf{B}, \mathbf{C} \in \mathbb{R}^{N \times N}$ stored in contiguous row-major layout:
 $$\mathbf{C}[i, j] = \sum_{k=0}^{N-1} \mathbf{A}[i, k] \times \mathbf{B}[k, j]$$
 
-- **Computational Workload:** $2 N^3$ Floating-Point Operations ($1$ multiplication $+ 1$ addition per inner iteration $k$).
+- **Computational Workload:** $2 N^3$ Floating-Point Operations ($1$ multiply $+ 1$ add per inner step $k$).
 - **Memory Footprint:** $3 \times N^2 \times 4\text{ bytes}$ ($3N^2$ single-precision floats).
 
 ---
 
-## ⚙️ Algorithms & Implementation Details
+## ⚙️ Architectural Analysis: Naive vs. Tiled GEMM
 
-### 1. CPU Baseline (`src/cpu_baseline.cpp`)
-- **Algorithm:** Canonical triple-nested loop ($i$-$j$-$k$ order).
-- **Initialization:** Deterministic pseudorandom generation using `std::mt19937` with fixed seeds (`42` for $\mathbf{A}$, `84` for $\mathbf{B}$) to guarantee exact numerical reproducibility across runs and environments.
-- **Timing:** High-resolution wall-clock measurement via `std::chrono::high_resolution_clock`.
-- **Validation:** Enforces strictly positive dimensions ($N > 0$) and iterations ($> 0$), exiting with status code `1` on invalid arguments.
+### 1. Stage 1: Naive CUDA GEMM (`src/matmul_naive.cu`)
+- **Execution Model:** Each thread $(row, col)$ calculates one element of $\mathbf{C}$ by reading all $N$ elements of row $row$ in $\mathbf{A}$ and column $col$ in $\mathbf{B}$ directly from off-chip DRAM (Global Memory).
+- **The Bottleneck:** DRAM latency is approximately 400–800 clock cycles. For an $N \times N$ matrix, each element of $\mathbf{A}$ and $\mathbf{B}$ is fetched from DRAM $N$ times by distinct threads.
+- **Arithmetic Intensity:**
+  $$\text{Arithmetic Intensity}_{\text{naive}} = \frac{2 \text{ FLOPs}}{2 \times 4 \text{ Bytes}} = 0.25 \text{ FLOP / Byte}$$
+  This is far below the ridge-point of modern GPUs (e.g. Tesla T4 requires $\approx 60+\text{ FLOP/Byte}$ to saturate compute cores), making the naive kernel memory-bandwidth bound.
 
-### 2. Naive CUDA Kernel (`src/matmul_naive.cu`)
-- **Thread Mapping:** 2D Grid of 2D Thread Blocks (default $16 \times 16 = 256$ threads/block). Each thread is mapped to a single output element $(row, col)$:
+### 2. Stage 2: Shared-Memory Tiled GEMM (`src/matmul_tiled.cu`)
+- **Execution Model:** Partitions the $N \times N$ matrices into tiles of dimension $T \times T$ (default $16 \times 16$).
+- **Cooperative Shared Memory Caching:**
+  - In each phase $m \in [0, \lceil N / T \rceil - 1]$, threads within a block cooperatively load tile $m$ of $\mathbf{A}$ into `__shared__ float s_A[T][T]` and tile $m$ of $\mathbf{B}$ into `__shared__ float s_B[T][T]`.
+  - Shared memory resides on-chip with $\approx 20\text{–}30$ cycle access latency and orders of magnitude higher aggregate bandwidth than global memory.
+  - Each element loaded once into shared memory is reused $T$ times by all $T$ threads in the row/column of the thread block.
+- **Arithmetic Intensity Boost:**
+  $$\text{Global Loads per Element} = \frac{2 N}{T}$$
+  $$\text{Arithmetic Intensity}_{\text{tiled}} \approx T \times \text{Arithmetic Intensity}_{\text{naive}} = 16 \times 0.25 = 4.0 \text{ FLOP / Byte}$$
+  Global DRAM memory traffic is reduced by a factor of $T$ (16× for $16 \times 16$ tiles).
+
+### 3. Synchronization Barrier Protocol (`__syncthreads()`)
+Tiled GEMM requires exactly two synchronization barriers per phase tile:
+1. **Barrier 1 (Post-Load):**
+   ```cpp
+   __syncthreads();
+   ```
+   *Purpose:* Guarantees that all $T \times T$ threads in the block have finished writing their assigned elements into `s_A` and `s_B` before any thread begins computing partial products. Prevents **Read-After-Write (RAW)** hazards.
+2. **Barrier 2 (Post-Compute):**
+   ```cpp
+   __syncthreads();
+   ```
+   *Purpose:* Guarantees that all threads have completed multiplying `s_A` and `s_B` for phase $m$ before any fast thread proceeds to the next iteration $m+1$ and overwrites `s_A` and `s_B`. Prevents **Write-After-Read (WAR)** hazards.
+
+### 4. Boundary Handling for Arbitrary Dimensions
+To support arbitrary matrix dimensions $N$ (e.g. non-multiples like 17, 37, 311, 1024, 2048):
+- **Cooperative Load Zero-Padding:**
   ```cpp
-  int col = blockIdx.x * blockDim.x + threadIdx.x; // Column (x -> horizontal)
-  int row = blockIdx.y * blockDim.y + threadIdx.y; // Row    (y -> vertical)
+  int a_col = m * TILE_DIM + tx;
+  s_A[ty][tx] = (row < N && a_col < N) ? A[row * N + a_col] : 0.0f;
+
+  int b_row = m * TILE_DIM + ty;
+  s_B[ty][tx] = (b_row < N && col < N) ? B[b_row * N + col] : 0.0f;
   ```
-- **Boundary Handling:** To support arbitrary matrix dimensions that are not multiples of the block dimension:
+- **Deadlock-Free Execution:** Because the boundary condition is handled by zero-padding rather than divergent branching around `__syncthreads()`, **every thread unconditionally enters the barrier**, guaranteeing zero synchronization deadlocks.
+- **Write-Back Guard:** Output writes to global memory are guarded:
   ```cpp
-  dim3 block(block_dim, block_dim);
-  dim3 grid((N + block.x - 1) / block.x, (N + block.y - 1) / block.y);
-
   if (row < N && col < N) {
-      // Execute dot product
+      C[row * N + col] = p_value;
   }
   ```
-- **CUDA Error Checking:**
-  - `CUDA_CHECK(call)` macro wraps every CUDA Runtime API call (`cudaMalloc`, `cudaMemcpy`, `cudaEventCreate`, etc.).
-  - `CUDA_CHECK_LAST_ERROR()` checks `cudaGetLastError()` immediately after kernel launches to capture invalid grid/block dimensioning or configuration errors.
-- **Phase-Isolated Timing:** Uses three pairs of `cudaEvent_t` timers to isolate memory movement from compute:
-  1. **Host-to-Device (H2D) Transfer:** Measures PCIe copy of $\mathbf{A}$ and $\mathbf{B}$ to device memory.
-  2. **Kernel Execution:** Measures pure GPU kernel execution time (excluding PCIe transfers).
-  3. **Device-to-Host (D2H) Transfer:** Measures PCIe copy of output $\mathbf{C}$ back to host.
-- **Dual-Tier Numerical Verification:**
-  - **Full Verification ($N \le 1024$):** Exhaustively compares all $N^2$ elements between the GPU output and a golden CPU reference.
-  - **Sampled Verification ($N > 1024$):** Evaluates at least $257$ deterministically selected output elements across matrix corners, centers, octile grid coordinates, and block boundaries using standalone CPU dot products. This eliminates the multi-second/minute CPU bottleneck of an $O(N^3)$ reference while guaranteeing rigorous numerical verification.
-  - **Tolerances:** $\left| C_{\text{cpu}}[i] - C_{\text{gpu}}[i] \right| \le \text{atol} + \text{rtol} \times \left| C_{\text{cpu}}[i] \right|$ (`atol = 1e-4f`, `rtol = 1e-3f`).
-  - **Non-Finite Detection:** Detects any `NaN` or `Inf` floating-point anomalies in GPU output.
-  - **Timing Isolation:** Verification is strictly executed after all GPU events are synchronized and recorded, ensuring verification overhead is never added to reported GPU kernel runtime.
-  - **Optional Skip:** Passing `--no-verify` allows benchmark runs without CPU verification, unambiguously logging `SKIPPED`.
 
 ---
 
@@ -94,124 +112,99 @@ $$\mathbf{C}[i, j] = \sum_{k=0}^{N-1} \mathbf{A}[i, k] \times \mathbf{B}[k, j]$$
 ```bash
 g++ -O3 -std=c++14 src/cpu_baseline.cpp -o src/cpu_baseline
 ```
-*Run manual benchmark:*
-```bash
-# Usage: ./src/cpu_baseline [matrix_size N] [iterations] [--csv]
-./src/cpu_baseline 512 3
-```
 
 ### Compile Naive CUDA Kernel (`nvcc`)
 ```bash
 nvcc -O3 src/matmul_naive.cu -o src/matmul_naive
 ```
-*Run manual kernel execution:*
+
+### Compile Shared-Memory Tiled CUDA Kernel (`nvcc`)
 ```bash
-# Usage: ./src/matmul_naive [matrix_size N] [block_dim] [iterations] [--csv]
-./src/matmul_naive 512 16 3
+nvcc -O3 src/matmul_tiled.cu -o src/matmul_tiled
 ```
 
 ---
 
 ## 🧪 Correctness & Edge-Case Testing
 
-The test suite in `tests/run_tests.py` validates:
-1. **Small matrices:** $1 \times 1$, $16 \times 16$, $32 \times 32$.
-2. **Non-multiple boundary dimensions:** $17 \times 17$, $37 \times 37$, $100 \times 100$, $311 \times 311$.
-3. **Thread block dimension variations:** Block sizes $8 \times 8$, $16 \times 16$, and $32 \times 32$.
-4. **Invalid inputs:** Negative dimensions (`-5`), zero dimension (`0`), non-numeric strings (`abc`), and invalid block dimensions.
+The automated test runner (`tests/run_tests.py`) exercises **47 distinct test cases**:
+1. **Part 1 — CPU Baseline (11 tests):** Unit sizes, power-of-2 sizes, edge cases (17, 37, 100), and invalid argument rejection.
+2. **Part 2 — Naive CUDA Kernel (17 tests):** Sizes from $1 \times 1$ to $2048 \times 2048$, custom block dimensions (8, 16, 32), boundary dimensions, and full/sampled numerical verification.
+3. **Part 3 — Tiled CUDA Kernel (19 tests):** Exact tile fits, non-divisible partial tiles (17, 37, 311), custom tile dimensions (8, 16, 32), boundary full verification ($1024 \times 1024$), large sampled verification ($2048 \times 2048$), and invalid input checks.
 
-*Run the test suite:*
+### Running the Test Suite
 ```bash
 python tests/run_tests.py
-# Or on Linux:
+# Or via Bash:
 bash tests/run_tests.sh
 ```
+*Note: In environments without an NVIDIA GPU or `nvcc`, the 11 CPU baseline tests execute and pass locally, while GPU tests are clearly flagged with instructions for running in Google Colab.*
 
 ---
 
-## ⏱️ Timing Methodology & Metrics
+## ⏱️ Verification Methodology & Tolerances
 
-- **Kernel Throughput (GFLOPS):**
-  $$\text{Throughput} = \frac{2 \times N^3}{\text{elapsed\_time\_seconds} \times 10^9}$$
-- **Warmup:** Warmup iterations are executed before timing to prime device clocks, instruction caches, and memory controllers.
-- **Iterations:** Multiple iterations (default 3) are recorded; min, average, and max times are computed to detect variance and thermal throttling.
-
----
-
-## 📊 Measured CPU Baseline Benchmark Results
-
-The following measurements were taken on the local test hardware using `g++ -O3` and recorded in `benchmarks/cpu_benchmark_results.csv`:
-
-| Matrix Size ($N$) | Operations | Min Time (ms) | Avg Time (ms) | Max Time (ms) | Throughput (GFLOPS) |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| **64** | 0.52 MFLOP | $< 0.001$ ms | 0.33 ms | 1.00 ms | $> 5.0$ |
-| **128** | 4.19 MFLOP | 0.94 ms | 1.29 ms | 1.96 ms | **4.48** |
-| **256** | 33.55 MFLOP | 11.82 ms | 12.27 ms | 13.10 ms | **2.84** |
-| **512** | 268.44 MFLOP | 94.66 ms | 95.39 ms | 95.88 ms | **2.84** |
-| **1024** | 2,147.48 MFLOP | 2,527.33 ms | 2,551.43 ms | 2,568.08 ms | **0.85** |
-
-> **CPU Architecture Observation:** As $N$ expands from $512$ to $1024$, matrix working sets exceed on-chip CPU cache (L1/L2), causing memory stalls from non-unit strides along matrix $\mathbf{B}$ and degrading CPU throughput from $2.84$ down to $0.85$ GFLOPS.
+- **Full Verification ($N \le 1024$):** Exhaustive comparison across all $N \times N$ elements between GPU output and golden single-threaded CPU reference.
+- **Sampled Verification ($N > 1024$):** Evaluates at least $257$ deterministically selected output elements across corners, edges, centers, octile grid intersections, and tile boundaries using independent CPU scalar dot products to prevent prohibitive $O(N^3)$ CPU execution times.
+- **Numerical Tolerances:**
+  $$\left| C_{\text{cpu}}[i] - C_{\text{gpu}}[i] \right| \le \text{atol} + \text{rtol} \times \left| C_{\text{cpu}}[i] \right|$$
+  - Absolute tolerance: $\text{atol} = 1.0 \times 10^{-4}$
+  - Relative tolerance: $\text{rtol} = 1.0 \times 10^{-3}$
+- **Non-Finite Detection:** Explicitly flags any `NaN` or `Inf` in GPU outputs.
 
 ---
 
-## ⚠️ Limitations of the Stage 1 Naive CUDA Kernel
+## 📊 Benchmark Sweeper & Comparative Harness
 
-While the naive kernel demonstrates correct parallel execution, it suffers from three critical architectural bottlenecks:
-1. **Redundant High-Latency DRAM Accesses:** Each thread computes a single output by fetching $N$ elements from $\mathbf{A}$ and $N$ elements from $\mathbf{B}$ directly from off-chip DRAM (Global Memory, 400–800 cycle latency). Across all $N^2$ threads, $2 N^3$ floats are loaded from DRAM with zero data reuse between neighboring threads in the same block.
-2. **Severely Low Arithmetic Intensity ($0.25\text{ FLOP / Byte}$):** For every inner multiply-accumulate (2 FLOPs), 2 floats (8 bytes) are fetched from global memory. Because modern GPUs require an arithmetic intensity of $30 - 100+\text{ FLOP / Byte}$ to saturate compute cores, the naive kernel is completely memory-bandwidth saturated.
-3. **No Utilization of Shared Memory (SRAM):** On-chip shared memory is unused in Stage 1.
+The benchmark sweeper (`benchmarks/run_benchmarks.py`) executes multi-size sweeps and exports real hardware measurements:
 
-*These bottlenecks motivate Stage 2: Shared-Memory Tiled GEMM.*
+### Benchmark Options
+```bash
+# 1. Run comparative benchmark between Naive and Tiled (identical sizes & iterations)
+python benchmarks/run_benchmarks.py --compare --sizes 64 128 256 512 1024 2048 --iters 3
 
----
+# 2. Run only Tiled CUDA sweep
+python benchmarks/run_benchmarks.py --tiled-only --sizes 64 128 256 512 1024 2048
 
-## ☁️ Google Colab Execution Guide (NVIDIA GPU Runtime)
+# 3. Run only Naive CUDA sweep
+python benchmarks/run_benchmarks.py --naive-only --sizes 64 128 256 512 1024 2048
 
-To execute and verify the CUDA kernel on an NVIDIA GPU (e.g. T4 / V100 / A100) via Google Colab:
-
-### Step 1: Open a New Colab Notebook and Set Runtime
-1. Navigate to [Google Colab](https://colab.research.google.com).
-2. Go to **Runtime** $\rightarrow$ **Change runtime type**.
-3. Under **Hardware accelerator**, select **T4 GPU** (or any available NVIDIA GPU) and click **Save**.
-
-### Step 2: Verify GPU Environment in Colab
-In the first Colab notebook cell:
-```python
-!nvidia-smi
-!nvcc --version
+# 4. Run only CPU sweep
+python benchmarks/run_benchmarks.py --cpu-only --sizes 64 128 256 512 1024
 ```
 
-### Step 3: Upload or Clone the Repository
-Upload the `cuda-kernel-lab` folder or clone your repository:
-```python
-%cd /content
-# If using git:
-# !git clone https://github.com/<your-username>/cuda-kernel-lab.git
-# %cd cuda-kernel-lab
+### Performance Integrity Notice
+> **Empirical Rigor:** Performance speedups and GFLOPS throughput figures are never fabricated or estimated. All comparative numbers must be collected through live execution on actual GPU hardware (such as an NVIDIA Tesla T4 in Google Colab).
+
+---
+
+## ☁️ Google Colab Execution Guide (NVIDIA Tesla T4)
+
+To run the complete Stage 1 & Stage 2 verification and benchmarking on Google Colab:
+
+### 1. Set Hardware Accelerator
+- In Google Colab, select **Runtime** $\rightarrow$ **Change runtime type** $\rightarrow$ **T4 GPU** $\rightarrow$ **Save**.
+
+### 2. Clone the Repository
+```bash
+!git clone https://github.com/mainakhindocha/CUDA-Kernel-Lab-GPU-Performance-Benchmarking.git
+%cd CUDA-Kernel-Lab-GPU-Performance-Benchmarking
 ```
 
-### Step 4: Compile Both Executables
-```python
+### 3. Compile All Kernels
+```bash
 !g++ -O3 -std=c++14 src/cpu_baseline.cpp -o src/cpu_baseline
 !nvcc -O3 src/matmul_naive.cu -o src/matmul_naive
+!nvcc -O3 src/matmul_tiled.cu -o src/matmul_tiled
 ```
 
-### Step 5: Run the Stage 1 Test Suite
-```python
+### 4. Execute the Full Correctness Test Suite (47 Tests)
+```bash
 !python tests/run_tests.py
 ```
-*Expected Output:*
-```text
-[PART 1] Testing CPU Baseline (src/cpu_baseline)
-  T-CPU-01 ... [PASS]
-  ...
-[PART 2] Testing Naive CUDA Kernel (src/matmul_naive)
-  T-GPU-01 to T-GPU-12 ... [PASS]
-  E-GPU-01 to E-GPU-03 ... [PASS]
-```
 
-### Step 6: Run the Multi-Size Benchmark Suite
-```python
-!python benchmarks/run_benchmarks.py --sizes 64 128 256 512 1024 2048 --iters 3
+### 5. Run Stage 1 vs. Stage 2 Comparative Benchmarking
+```bash
+!python benchmarks/run_benchmarks.py --compare --sizes 64 128 256 512 1024 2048 --iters 3
 ```
-This will record real, un-fabricated GPU benchmark results to `benchmarks/cuda_benchmark_results.csv` including isolated H2D, kernel, D2H times, and throughput.
+This generates `benchmarks/kernel_comparison_results.csv` and outputs a side-by-side performance table detailing Naive GFLOPS, Tiled GFLOPS, measured speedup, and numerical verification status.
