@@ -1,0 +1,22 @@
+# Executables and build artifacts
+*.exe
+*.o
+*.obj
+*.out
+src/cpu_baseline
+src/matmul_naive
+
+# Preserve benchmark execution data and backups locally (uncommitted)
+benchmarks/*.csv
+benchmarks/*.csv.bak
+*.bak
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Editor & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
