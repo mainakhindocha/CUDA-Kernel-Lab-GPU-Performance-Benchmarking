@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Stage 1 & Stage 2 Benchmark Runner
-Project: CUDA Kernel Lab — GPU Performance Benchmarking
+Project: CUDA Kernel Lab -- GPU Performance Benchmarking
 
 Executes CPU baseline, Naive CUDA kernel, and Shared-Memory Tiled CUDA kernel
 across multiple matrix dimensions, records actual measured hardware performance,
@@ -212,7 +212,7 @@ def run_comparative_benchmarks(sizes, dim, iters):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CUDA Kernel Lab — Stage 1 & Stage 2 Benchmark Sweeper")
+    parser = argparse.ArgumentParser(description="CUDA Kernel Lab -- Stage 1 & Stage 2 Benchmark Sweeper")
     parser.add_argument("--sizes", nargs="+", type=int, default=[64, 128, 256, 512, 1024, 2048],
                         help="Matrix sizes N to benchmark (default: 64 128 256 512 1024 2048)")
     parser.add_argument("--iters", type=int, default=3, help="Iterations per size (default: 3)")
@@ -227,7 +227,7 @@ def main():
     args = parser.parse_args()
 
     print("======================================================================")
-    print(" CUDA Kernel Lab — Performance Benchmark Sweeper (Stage 1 & Stage 2)")
+    print(" CUDA Kernel Lab -- Performance Benchmark Sweeper (Stage 1 & Stage 2)")
     print("======================================================================")
     print(f"Target Matrix Sizes : {args.sizes}")
     print(f"Iterations per run  : {args.iters}")

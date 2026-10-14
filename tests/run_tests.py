@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Stage 1 & Stage 2 Test Suite Runner
-Project: CUDA Kernel Lab — GPU Performance Benchmarking
+Project: CUDA Kernel Lab -- GPU Performance Benchmarking
 
 Validates:
 1. CPU Reference Baseline (src/cpu_baseline)
@@ -44,7 +44,7 @@ def run_command(cmd, expected_returncode=0):
 
 def main():
     print("=" * 72)
-    print(" CUDA Kernel Lab — Stage 1 & Stage 2 Correctness Test Suite")
+    print(" CUDA Kernel Lab -- Stage 1 & Stage 2 Correctness Test Suite")
     print("=" * 72)
 
     total_tests = 0
